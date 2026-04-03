@@ -3,7 +3,7 @@
 ## What this app does
 - Search any product → get price comparison from Amazon & Flipkart
 - Sentiment analysis on reviews per platform
-- Reddit public opinion
+- Reddit public opinion (live, via Reddit's search API)
 - Combined score & verdict dashboard
 
 ---
@@ -16,10 +16,10 @@ buysmart/
 ├── utils/
 │   ├── sentiment.py        ← Sentiment analysis (VADER)
 │   ├── search.py           ← Price fetching (SerpAPI)
-│   └── reddit.py           ← Reddit opinions (PRAW)
+│   └── reddit.py           ← Reddit opinions (Reddit JSON API)
 └── .streamlit/
     ├── config.toml         ← Dark theme config
-    └── secrets.toml        ← API keys (DO NOT push to GitHub)
+    └── secrets.toml        ← API keys (DO NOT push to GitHub — in .gitignore)
 ```
 
 ---
@@ -29,7 +29,7 @@ buysmart/
 ### Step 1 — Push to GitHub
 1. Create a new GitHub repo (e.g. `buysmart-ai`)
 2. Upload ALL these files maintaining the folder structure
-3. Make sure `.streamlit/secrets.toml` is in `.gitignore`
+3. Make sure `.streamlit/secrets.toml` is **in `.gitignore`** — never commit your API keys
 
 ### Step 2 — Deploy on Streamlit Cloud
 1. Go to https://streamlit.io/cloud
@@ -40,36 +40,42 @@ buysmart/
 
 ### Step 3 — Add API Keys (Optional but recommended)
 In Streamlit Cloud → Your App → **Settings → Secrets**, paste:
-```
-SERPAPI_KEY = "your_key"
-REDDIT_CLIENT_ID = "your_id"
-REDDIT_CLIENT_SECRET = "your_secret"
+```toml
+SERPAPI_KEY = "your_key_here"
 ```
 
-> **Without API keys the app works in Demo Mode with realistic sample data.**
+> **Without API keys the app runs in Demo Mode with realistic sample data.**
 > It still shows all features perfectly for your exam/viva!
 
 ---
 
 ## 🔑 Getting Free API Keys
 
-### SerpAPI (for real prices)
+### SerpAPI (for real live prices)
 1. Go to https://serpapi.com
 2. Sign up free → get 100 searches/month free
-3. Copy your API key
-
-### Reddit API (for real Reddit opinions)
-1. Go to https://www.reddit.com/prefs/apps
-2. Click **"Create App"**
-3. Type: `script`
-4. Name: `BuySmartAI`
-5. Redirect URI: `http://localhost:8080`
-6. Copy `client_id` (under app name) and `client_secret`
+3. Copy your API key from the dashboard
+4. Add it to `.streamlit/secrets.toml` locally:
+   ```toml
+   SERPAPI_KEY = "your_key_here"
+   ```
 
 ---
 
-## 🧪 Run Locally (optional)
+## 🧪 Run Locally
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+For local API key usage, create `.streamlit/secrets.toml`:
+```toml
+SERPAPI_KEY = "your_serpapi_key"
+```
+
+---
+
+## ⚠️ Security Notes
+- **Never hardcode API keys** in Python source files
+- Add `.streamlit/secrets.toml` to `.gitignore` before your first commit
+- Use Streamlit Cloud's Secrets Manager for deployed apps

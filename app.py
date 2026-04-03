@@ -6,7 +6,7 @@ from utils.reddit import fetch_reddit_opinions
 import plotly.express as px
 import plotly.graph_objects as go
 
-# ── Page config ──────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="BuySmart AI",
     page_icon="🛒",
@@ -73,6 +73,21 @@ h1, h2, h3, .big-title { font-family: 'Syne', sans-serif !important; }
 .flipkart{ background: #2874f0; color: #fff; }
 .reddit  { background: #FF4500; color: #fff; }
 .combined{ background: linear-gradient(90deg,#f7971e,#ffd200); color:#000; }
+
+/* Sample data badge */
+.sample-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: #ccc;
+    margin-left: 8px;
+    vertical-align: middle;
+    letter-spacing: 0.03em;
+}
 
 /* Metric box */
 .metric-box {
@@ -147,6 +162,17 @@ h1, h2, h3, .big-title { font-family: 'Syne', sans-serif !important; }
     color: #ccc;
 }
 
+/* Info banner */
+.info-banner {
+    background: rgba(247,151,30,0.1);
+    border: 1px solid rgba(247,151,30,0.3);
+    border-radius: 10px;
+    padding: 0.7rem 1.2rem;
+    font-size: 0.88rem;
+    color: #ffd07b;
+    margin-bottom: 1.2rem;
+}
+
 /* Price table */
 .price-best { color: #4ade80; font-weight: 700; }
 .price-tag {
@@ -176,12 +202,16 @@ with col2:
 # ── Main Logic ────────────────────────────────────────────────────────────────
 if search_clicked and product_query.strip():
     with st.spinner("🔎 Fetching prices & reviews..."):
-        products   = fetch_products(product_query)
+        products, used_mock_prices = fetch_products(product_query)
         reddit_data = fetch_reddit_opinions(product_query)
 
     if not products:
         st.error("No results found. Try a different product name.")
         st.stop()
+
+    # Determine if reviews are from mock data (they always are currently,
+    # since SerpAPI Shopping doesn't return review text)
+    reviews_are_mock = any(p.get("reviews_source") == "mock" for p in products)
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
     tab1, tab2, tab3 = st.tabs(["💰 Price Comparison", "💬 Review Intelligence", "📊 Combined Dashboard"])
@@ -191,6 +221,14 @@ if search_clicked and product_query.strip():
     # ════════════════════════════════════════════════════════════════════════
     with tab1:
         st.markdown("### 💰 Price Comparison")
+
+        if used_mock_prices:
+            st.markdown("""
+            <div class="info-banner">
+                ℹ️ <b>Demo Mode</b> — No SerpAPI key found. Showing sample price data.
+                Add <code>SERPAPI_KEY</code> to your Streamlit secrets for live prices.
+            </div>
+            """, unsafe_allow_html=True)
 
         df = pd.DataFrame(products)[["platform", "title", "price", "rating", "url"]]
         df = df.sort_values("price")
@@ -238,6 +276,15 @@ if search_clicked and product_query.strip():
     with tab2:
         st.markdown("### 💬 Review Intelligence by Platform")
 
+        if reviews_are_mock:
+            st.markdown("""
+            <div class="info-banner">
+                ℹ️ <b>Sample Review Data</b> — Review sentiment is based on representative sample reviews,
+                not actual verified reviews for this specific product.
+                This is a platform limitation (real review scraping requires additional APIs).
+            </div>
+            """, unsafe_allow_html=True)
+
         for p in products:
             if not p.get("reviews"):
                 continue
@@ -251,9 +298,11 @@ if search_clicked and product_query.strip():
             badge_class = "amazon" if "amazon" in p["platform"].lower() else "flipkart"
             color = "#4ade80" if score >= 60 else ("#f87171" if score < 40 else "#facc15")
 
+            sample_badge = '<span class="sample-badge">📋 Sample Data</span>' if p.get("reviews_source") == "mock" else ""
+
             st.markdown(f"""
             <div class="card">
-                <span class="platform-badge {badge_class}">{p['platform']}</span>
+                <span class="platform-badge {badge_class}">{p['platform']}</span>{sample_badge}
                 <span style="float:right;font-size:1.6rem;font-weight:800;color:{color};">{score}% 😊</span>
                 <br>
                 <span class="pos">✅ Positive: {pos}%</span> &nbsp;
@@ -308,13 +357,21 @@ if search_clicked and product_query.strip():
         verdict_color = "#4ade80" if overall_score >= 65 else ("#f87171" if overall_score < 40 else "#facc15")
         verdict = "✅ Worth Buying" if overall_score >= 65 else ("❌ Think Twice" if overall_score < 40 else "⚠️ Mixed Feelings")
 
+        if reviews_are_mock:
+            st.markdown("""
+            <div class="info-banner">
+                ℹ️ <b>Note:</b> Combined score includes sample review data.
+                Reddit opinions (live) are weighted into the final verdict.
+            </div>
+            """, unsafe_allow_html=True)
+
         # Top metrics
         c1, c2, c3, c4 = st.columns(4)
         metrics = [
             ("Overall Score", f"{overall_score}%", verdict_color),
-            ("Positive", f"{combined['positive']}%", "#4ade80"),
-            ("Negative", f"{combined['negative']}%", "#f87171"),
-            ("Neutral",  f"{combined['neutral']}%",  "#facc15"),
+            ("Positive",      f"{combined['positive']}%", "#4ade80"),
+            ("Negative",      f"{combined['negative']}%", "#f87171"),
+            ("Neutral",       f"{combined['neutral']}%",  "#facc15"),
         ]
         for col, (label, val, color) in zip([c1, c2, c3, c4], metrics):
             with col:

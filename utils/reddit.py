@@ -1,6 +1,6 @@
 """
-Fetches Reddit opinions about a product using Pushshift API (no API key needed).
-Falls back to mock data if request fails.
+Fetches Reddit opinions about a product using Reddit's public JSON search API.
+Falls back to mock data if the request fails.
 """
 
 import requests
@@ -22,10 +22,11 @@ def _mock_reddit(query: str) -> list[dict]:
     return posts
 
 
+@st.cache_data(show_spinner=False)
 def fetch_reddit_opinions(query: str) -> list[dict]:
     """
-    Fetch Reddit posts mentioning the product.
-    Uses Reddit's JSON API (no API key needed).
+    Fetch Reddit posts mentioning the product via Reddit's JSON search API.
+    Returns a list of dicts with a 'text' key.
     """
     try:
         url = "https://www.reddit.com/search.json"
@@ -39,16 +40,17 @@ def fetch_reddit_opinions(query: str) -> list[dict]:
         response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
-        
+
         results = []
         for post in data.get("data", {}).get("children", []):
             post_data = post.get("data", {})
             text = post_data.get("title", "")
             if post_data.get("selftext"):
                 text += " " + post_data.get("selftext", "")[:200]
-            results.append({"text": text.strip()})
-        
+            if text.strip():
+                results.append({"text": text.strip()})
+
         return results[:10] if results else _mock_reddit(query)
     except Exception as e:
-        print(f"Error: {e}")  # For debugging
+        print(f"Reddit fetch error: {e}")
         return _mock_reddit(query)

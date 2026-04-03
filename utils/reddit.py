@@ -1,14 +1,10 @@
 """
-Fetches Reddit opinions about a product using PRAW (Reddit API).
-Falls back to mock data if credentials not set.
+Fetches Reddit opinions about a product using Pushshift API (no API key needed).
+Falls back to mock data if request fails.
 """
 
-import os
+import requests
 import streamlit as st
-
-REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-REDDIT_USER_AGENT    = "BuySmartAI/1.0"
 
 
 def _mock_reddit(query: str) -> list[dict]:
@@ -29,29 +25,30 @@ def _mock_reddit(query: str) -> list[dict]:
 def fetch_reddit_opinions(query: str) -> list[dict]:
     """
     Fetch Reddit posts mentioning the product.
-    Uses PRAW if credentials are set, else returns mock data.
+    Uses Reddit's JSON API (no API key needed).
     """
-    if not REDDIT_CLIENT_ID or not REDDIT_CLIENT_SECRET:
-        return _mock_reddit(query)
-
     try:
-        import praw
-        reddit = praw.Reddit(
-            client_id=REDDIT_CLIENT_ID,
-            client_secret=REDDIT_CLIENT_SECRET,
-            user_agent=REDDIT_USER_AGENT,
-        )
+        url = "https://www.reddit.com/search.json"
+        params = {
+            "q": f"{query} review",
+            "sort": "relevance",
+            "limit": 15,
+            "type": "link"
+        }
+        headers = {"User-Agent": "BuySmartAI/1.0"}
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
         results = []
-        for submission in reddit.subreddit("all").search(
-            f"{query} review", limit=15, sort="relevance"
-        ):
-            text = submission.title
-            if submission.selftext:
-                text += " " + submission.selftext[:200]
+        for post in data.get("data", {}).get("children", []):
+            post_data = post.get("data", {})
+            text = post_data.get("title", "")
+            if post_data.get("selftext"):
+                text += " " + post_data.get("selftext", "")[:200]
             results.append({"text": text.strip()})
-
+        
         return results[:10] if results else _mock_reddit(query)
-
     except Exception as e:
-        st.warning(f"Reddit fetch failed: {e}. Using sample data.")
+        print(f"Error: {e}")  # For debugging
         return _mock_reddit(query)

@@ -1,13 +1,13 @@
 """
 Fetches product prices & reviews from Amazon/Flipkart via SerpAPI.
-Falls back to realistic mock data if API key not set.
+Falls back to realistic mock data if API request fails.
 """
 
 import os
 import requests
 import streamlit as st
 
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")   # set in Streamlit secrets
+SERPAPI_KEY = "70081f6057af2fd27e8ffc5865acc47a91ffd11a8c30206fd1bbdb7f58098bcd"   # Provided API key
 
 
 def _serpapi_search(query: str, engine: str = "google_shopping") -> list[dict]:
@@ -86,14 +86,11 @@ def _mock_products(query: str) -> list[dict]:
 def fetch_products(query: str) -> list[dict]:
     """
     Main function called by app.py.
-    Uses SerpAPI if key exists, else falls back to mock data.
+    Uses SerpAPI for live results.
     """
-    if not SERPAPI_KEY:
-        st.info("💡 Demo mode: Using sample data. Add SERPAPI_KEY in Streamlit secrets for live results.")
-        return _mock_products(query)
-
     results = _serpapi_search(query)
     if not results:
+        st.warning("No results found from SerpAPI. Using sample data.")
         return _mock_products(query)
 
     products = []

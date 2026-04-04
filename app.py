@@ -2,11 +2,56 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import json
 
 from utils.sentiment import analyze_sentiment, get_combined_score
 from utils.search import fetch_products
 from utils.reddit import fetch_reddit_opinions
 from utils.youtube import fetch_youtube_reviews, analyze_youtube_sentiment
+from utils.ecommerce_reviews import fetch_ecommerce_reviews
+from utils.nlp_deep import run_deep_nlp
+
+def get_ai_verdict(product_name, best_price, ov_score, yt_score, reddit_sc, aspect_scores):
+    import requests
+    import os
+    api_key = st.secrets.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return "⚠️ OpenRouter API Key missing. Please configure secrets.toml."
+        
+    prompt = f"""
+    You are an expert AI shopping assistant for BuySmart. Based on the following intelligence data, write a short, punchy paragraph (max 50 words) summarizing whether the user should buy '{product_name}'.
+    - Overall Score: {ov_score}/100 
+    - YouTube Reviews Score: {yt_score}/100
+    - Reddit Opinions Score: {reddit_sc}/100
+    - Best Price: ₹{best_price}
+    - Aspect Ratings: {aspect_scores}
+    
+    Give a brief summary of the sentiment and explicitly end with:
+    "Verdict: Strong Buy", "Verdict: Buy", "Verdict: Wait/Consider", or "Verdict: Avoid".
+    """
+    try:
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://buysmart.ai",
+                "X-Title": "BuySmart AI"
+            },
+            json={
+                "model": "arcee-ai/trinity-large-preview:free",
+                "messages": [
+                    {"role": "system", "content": "You are a concise, direct e-commerce analyst. Give highly actionable concise advice."},
+                    {"role": "user", "content": prompt}
+                ]
+            },
+            timeout=15
+        )
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"AI summary currently unavailable. Error: {e}"
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -279,7 +324,7 @@ st.markdown("""
 col_q, col_btn = st.columns([5, 1])
 with col_q:
     product_query = st.text_input(
-        "", placeholder="Search any product — iPhone 15, Sony WH-1000XM5, Nike Air Max...",
+        "Product Query", placeholder="Search any product — iPhone 15, Sony WH-1000XM5, Nike Air Max...",
         label_visibility="collapsed", key="q"
     )
 with col_btn:
@@ -316,10 +361,43 @@ if go_btn and product_query.strip():
         st.error(f"❌ Price fetch failed: {errs.get('prices', 'No results found.')}")
         st.stop()
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # ── Fetch ecommerce reviews (background, non-blocking) ──
+    amazon_asin    = ""
+    flipkart_url   = ""
+    for p in products:
+        if p["platform"] == "Amazon" and "amazon.in/dp/" in p.get("url", ""):
+            amazon_asin = p["url"].split("/dp/")[1].split("/")[0].split("?")[0]
+            break
+    for p in products:
+        if p["platform"] == "Flipkart":
+            flipkart_url = p.get("url", "")
+            break
+
+    with st.spinner("🛍️ Mining e-commerce reviews..."):
+        try:
+            eco_reviews = fetch_ecommerce_reviews(
+                product_query, amazon_asin=amazon_asin, flipkart_url=flipkart_url
+            )
+        except Exception as e:
+            eco_reviews = {"amazon": [], "flipkart": [], "web": [], "all_texts": []}
+            errs["eco_reviews"] = str(e)
+
+    # Gather all text for Deep NLP across all sources
+    all_review_texts = []
+    for op in reddit_data:
+        all_review_texts.append(op.get("text", ""))
+    if yt_anal:
+        for c in yt_anal.get("comments", []):
+            all_review_texts.append(c.get("text", ""))
+    all_review_texts.extend(eco_reviews.get("all_texts", []))
+    all_review_texts = [t for t in all_review_texts if len(t.strip()) > 20]
+
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "💰 Price Comparison",
+        "⭐ E-com Reviews",
         "🌐 Community Reviews",
         "🎥 YouTube Reviews",
+        "🧠 Deep NLP",
         "📊 Intelligence Dashboard",
     ])
 
@@ -350,51 +428,95 @@ if go_btn and product_query.strip():
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        for _, row in df.iterrows():
+        PLATFORM_COLORS = {
+            "Amazon": "#FF9900", "Flipkart": "#4d90fe",
+            "Meesho": "#f43f5e", "Croma": "#16a34a",
+            "Reliance Digital": "#0ea5e9", "Snapdeal": "#f97316",
+            "Myntra": "#d946ef", "JioMart": "#2563eb",
+            "Tata Cliq": "#dc2626", "Other": "#6366f1",
+        }
+
+        for idx, (_, row) in enumerate(df.iterrows()):
             is_best  = row["price"] == best_price
             pl       = row["platform"]
             pl_lower = pl.lower()
-            b_cls    = ("b-amazon" if "amazon" in pl_lower else
+            b_cls    = ("b-amazon"   if "amazon"   in pl_lower else
                         "b-flipkart" if "flipkart" in pl_lower else "b-other")
             best_tag = ' <span class="badge b-best">🏆 Best Price</span>' if is_best else ""
             p_cls    = "c-green" if is_best else ""
+
+            # Product image
             thumb    = row.get("thumbnail", "")
-            img_html = (f'<img src="{thumb}" style="width:75px;height:75px;object-fit:contain;'
-                        f'border-radius:10px;background:rgba(255,255,255,0.04);'
-                        f'padding:4px;float:right;margin:0 0 8px 12px;">')  if thumb else ""
-            rating   = row.get("rating", 0)
-            r_html   = f'⭐ {rating}' if rating else ""
-            rc       = row.get("reviews_count", 0)
-            rc_html  = f' <span class="c-muted" style="font-size:0.8rem">({fmt_num(rc)} reviews)</span>' if rc else ""
+            img_html = (
+                f'<img src="{thumb}" style="width:90px;height:90px;object-fit:contain;'
+                f'border-radius:12px;background:rgba(255,255,255,0.05);'
+                f'padding:6px;float:right;margin:0 0 8px 14px;">'
+            ) if thumb else ""
+
+            # Rating
+            rating = row.get("rating", 0)
+            stars  = ""
+            if rating > 0:
+                full = int(rating)
+                stars = "★" * full + ("½" if rating - full >= 0.5 else "") + "☆" * (5 - full - (1 if rating - full >= 0.5 else 0))
+                r_html = f'<span style="color:#f59e0b">{stars}</span> <span style="color:#94a3b8;font-size:0.82rem">{rating}</span>'
+            else:
+                r_html = ""
+
+            rc      = row.get("reviews_count", 0)
+            rc_html = f' <span class="c-muted" style="font-size:0.8rem">· {fmt_num(rc)} reviews</span>' if rc else ""
+
+            # Prime / seller badge
+            badge_str = row.get("badge", "")
+            prime_html = ' <span class="badge" style="background:rgba(0,168,225,0.15);color:#00a8e1;border:1px solid rgba(0,168,225,0.3)">Prime</span>' if badge_str == "Prime" else ""
+
+            # Safe URL (ensure external)
+            url = row["url"]
+            if not url.startswith("http"):
+                url = "https://" + url
+
+            # Savings marker
+            if is_best and savings > 0:
+                save_html = f'<span style="background:rgba(16,185,129,0.12);color:#10b981;border-radius:6px;padding:2px 8px;font-size:0.75rem;margin-left:8px">Save ₹{savings:,} vs highest</span>'
+            else:
+                save_html = ""
 
             st.markdown(f"""
             <div class="card">
                 <div class="card-top-bar"></div>
                 {img_html}
-                <span class="badge {b_cls}">{pl}</span>{best_tag}<br>
-                <b style="font-size:0.95rem; color:#e2e8f0">{row['title'][:95]}</b><br>
-                <span class="price-tag {p_cls}">₹{row['price']:,}</span>
-                &nbsp;&nbsp;<span style="color:#94a3b8;font-size:0.86rem">{r_html}</span>{rc_html}
+                <span class="badge {b_cls}">{pl}</span>{best_tag}{prime_html}{save_html}
                 <br>
-                <a href="{row['url']}" target="_blank"
-                   style="color:#818cf8;font-size:0.82rem;text-decoration:none;margin-top:6px;display:inline-block">
-                   View on {pl} →
+                <b style="font-size:0.97rem;color:#e2e8f0;line-height:1.4">{row['title'][:100]}</b>
+                <br>
+                <span class="price-tag {p_cls}">₹{row['price']:,}</span>
+                &nbsp;&nbsp;{r_html}{rc_html}
+                <br>
+                <a href="{url}"
+                   target="_blank"
+                   rel="noopener noreferrer"
+                   onclick="window.open('{url}','_blank','noopener,noreferrer');return false;"
+                   style="color:#818cf8;font-size:0.84rem;text-decoration:none;
+                          margin-top:8px;display:inline-flex;align-items:center;gap:4px;
+                          border:1px solid rgba(129,140,248,0.3);padding:4px 12px;
+                          border-radius:8px;">
+                   🛒 Buy on {pl} <span style="font-size:0.9rem">↗</span>
                 </a>
             </div>""", unsafe_allow_html=True)
 
-        # Price bar chart
-        colors = ["#FF9900" if "amazon" in p.lower() else
-                  "#4d90fe" if "flipkart" in p.lower() else "#6366f1"
-                  for p in df["platform"]]
-        fig_price = go.Figure(go.Bar(
-            x=df["platform"], y=df["price"],
+        # Price bar chart — use title+platform as x-label for uniqueness
+        bar_labels  = [f"{row['platform']}\n₹{row['price']:,}" for _, row in df.iterrows()]
+        bar_colors  = [PLATFORM_COLORS.get(row["platform"], "#6366f1") for _, row in df.iterrows()]
+        fig_price   = go.Figure(go.Bar(
+            x=bar_labels,
+            y=df["price"].tolist(),
             text=[f"₹{p:,}" for p in df["price"]],
             textposition="outside",
-            marker_color=colors,
+            marker_color=bar_colors,
             hovertemplate="<b>%{x}</b><br>₹%{y:,}<extra></extra>",
         ))
         st.plotly_chart(
-            dark_chart(fig_price, "Platform Price Comparison"),
+            dark_chart(fig_price, "Live Price Comparison — All Platforms"),
             use_container_width=True
         )
 
@@ -402,6 +524,55 @@ if go_btn and product_query.strip():
     # TAB 2 — COMMUNITY REVIEWS (REDDIT)
     # ══════════════════════════════════════════════════════════════════════════
     with tab2:
+        st.markdown('<div class="sec-lbl">⭐ E-Commerce User Reviews</div>', unsafe_allow_html=True)
+        if "eco_reviews" in errs:
+            st.warning(f"Note: {errs['eco_reviews']}")
+        amz_reviews = eco_reviews.get("amazon", [])
+        fk_reviews  = eco_reviews.get("flipkart", [])
+        web_reviews = eco_reviews.get("web", [])
+        total_eco   = len(amz_reviews) + len(fk_reviews) + len(web_reviews)
+        if total_eco == 0:
+            st.info("🧹 No scraped reviews yet. Amazon/Flipkart may have served a CAPTCHA. Try a different query.")
+        else:
+            st.markdown(f"""
+            <div class="card">
+                <div class="card-top-bar"></div>
+                <span style="color:#818cf8;font-size:0.85rem;font-weight:600">📈 Review Sources</span><br>
+                <span class="badge b-amazon">Amazon.in</span> <b style="color:#FF9900">{len(amz_reviews)}</b> reviews
+                &nbsp;&nbsp;
+                <span class="badge b-flipkart">Flipkart</span> <b style="color:#4d90fe">{len(fk_reviews)}</b> reviews
+                &nbsp;&nbsp;
+                <span class="badge b-other">Web</span> <b style="color:#6366f1">{len(web_reviews)}</b> results
+            </div>""", unsafe_allow_html=True)
+        eco_stabs = st.tabs(["🟡 Amazon.in", "🔵 Flipkart", "🌐 Web Reviews"])
+        with eco_stabs[0]:
+            if not amz_reviews:
+                st.info("Amazon reviews not available. Amazon may have served a CAPTCHA page.")
+            else:
+                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer as _VDREC
+                _vdr = _VDREC()
+                for rev in amz_reviews:
+                    _cp  = _vdr.polarity_scores(rev)["compound"]
+                    _lbl = "pos" if _cp >= 0.05 else ("neg" if _cp <= -0.05 else "")
+                    _ico = "✅" if _lbl == "pos" else ("❌" if _lbl == "neg" else "🔵")
+                    st.markdown(f'<div class="cci {_lbl}">{_ico} {rev}</div>', unsafe_allow_html=True)
+        with eco_stabs[1]:
+            if not fk_reviews:
+                st.info("Flipkart reviews not scraped (CSS selectors may have changed).")
+            else:
+                for rev in fk_reviews:
+                    st.markdown(f'<div class="cci">🔵 {rev}</div>', unsafe_allow_html=True)
+        with eco_stabs[2]:
+            if not web_reviews:
+                st.info("No web reviews found for this product.")
+            else:
+                for _item in web_reviews:
+                    _tx  = _item["text"] if isinstance(_item, dict) else _item
+                    _src = _item.get("source", "") if isinstance(_item, dict) else ""
+                    _st  = f'<span style="color:#64748b;font-size:0.75rem">({_src})</span>' if _src else ""
+                    st.markdown(f'<div class="cci">🌐 {_tx} {_st}</div>', unsafe_allow_html=True)
+
+    with tab3:
         st.markdown('<div class="sec-lbl">🌐 Community Reviews — Reddit</div>', unsafe_allow_html=True)
 
         if "reddit" in errs:
@@ -498,7 +669,7 @@ if go_btn and product_query.strip():
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 3 — YOUTUBE REVIEWS
     # ══════════════════════════════════════════════════════════════════════════
-    with tab3:
+    with tab4:
         st.markdown('<div class="sec-lbl">🎥 YouTube Review Intelligence</div>', unsafe_allow_html=True)
 
         if "youtube" in errs:
@@ -682,7 +853,172 @@ if go_btn and product_query.strip():
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 4 — INTELLIGENCE DASHBOARD
     # ══════════════════════════════════════════════════════════════════════════
-    with tab4:
+    # ──────────────────────────────────────────────────────────────────────────
+    # TAB 5 — DEEP NLP ANALYSIS
+    # ──────────────────────────────────────────────────────────────────────────
+    with tab5:
+        st.markdown('<div class="sec-lbl">🧠 Deep NLP Text Analytics</div>', unsafe_allow_html=True)
+
+        if not all_review_texts:
+            st.info("🔍 Run a search first. Deep NLP combines text from Reddit, YouTube, and E-commerce tabs.")
+        else:
+            with st.spinner("🧠 Running full NLP pipeline... (20-40 seconds)"):
+                try:
+                    nlp_result = run_deep_nlp(json.dumps(all_review_texts))
+                except Exception as _nlpe:
+                    nlp_result = {}
+                    st.error(f"NLP error: {_nlpe}")
+
+            if nlp_result:
+                vs = nlp_result.get("vocab", {})
+                st.markdown("#### 📊 Corpus Statistics")
+                _vc1, _vc2, _vc3, _vc4, _vc5, _vc6 = st.columns(6)
+                for _col, _val, _lbl, _clr in [
+                    (_vc1, vs.get("total_reviews", 0),           "Reviews",          "#818cf8"),
+                    (_vc2, vs.get("total_tokens", 0),            "Total Tokens",     "#06b6d4"),
+                    (_vc3, vs.get("unique_tokens", 0),           "Unique Words",     "#10b981"),
+                    (_vc4, f"{vs.get('vocab_richness_pct', 0)}%","Vocab Richness",   "#f59e0b"),
+                    (_vc5, vs.get("avg_words_per_review", 0),    "Avg Words/Review", "#ec4899"),
+                    (_vc6, vs.get("total_sentences", 0),         "Sentences",        "#a78bfa"),
+                ]:
+                    with _col:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-val" style="color:{_clr};font-size:1.5rem">{_val}</div>
+                            <div class="metric-lbl">{_lbl}</div>
+                        </div>""", unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # BoW + TF-IDF
+                st.markdown("#### 🧺 Bag of Words vs TF-IDF")
+                _cbw, _ctf = st.columns(2)
+                _bow = nlp_result.get("bow", {})
+                if _bow:
+                    with _cbw:
+                        _fbw = go.Figure(go.Bar(x=list(_bow.values())[:20], y=list(_bow.keys())[:20],
+                                                orientation="h", marker_color="#818cf8",
+                                                hovertemplate="<b>%{y}</b>: %{x}<extra></extra>"))
+                        _fbw.update_layout(yaxis=dict(autorange="reversed"))
+                        st.plotly_chart(dark_chart(_fbw, "Bag of Words — Top 20 Tokens", height=420), use_container_width=True)
+                _tfi = nlp_result.get("tfidf", {})
+                if _tfi:
+                    with _ctf:
+                        _ftf = go.Figure(go.Bar(x=list(_tfi.values())[:20], y=list(_tfi.keys())[:20],
+                                                orientation="h", marker_color="#10b981",
+                                                hovertemplate="<b>%{y}</b>: %{x:.4f}<extra></extra>"))
+                        _ftf.update_layout(yaxis=dict(autorange="reversed"))
+                        st.plotly_chart(dark_chart(_ftf, "TF-IDF — Top Terms by Importance", height=420), use_container_width=True)
+
+                # N-grams
+                st.markdown("#### 🔗 N-gram Analysis (Bigrams · Trigrams)")
+                _cbi, _ctr = st.columns(2)
+                _big = nlp_result.get("bigrams", {})
+                if _big:
+                    with _cbi:
+                        _fbi = go.Figure(go.Bar(x=list(_big.values()), y=list(_big.keys()),
+                                                orientation="h", marker_color="#f59e0b"))
+                        _fbi.update_layout(yaxis=dict(autorange="reversed"))
+                        st.plotly_chart(dark_chart(_fbi, "Top Bigrams", height=380), use_container_width=True)
+                _tri = nlp_result.get("trigrams", {})
+                if _tri:
+                    with _ctr:
+                        _ftr = go.Figure(go.Bar(x=list(_tri.values()), y=list(_tri.keys()),
+                                                orientation="h", marker_color="#ec4899"))
+                        _ftr.update_layout(yaxis=dict(autorange="reversed"))
+                        st.plotly_chart(dark_chart(_ftr, "Top Trigrams", height=380), use_container_width=True)
+
+                # LDA Topics
+                _topics = [t for t in nlp_result.get("topics", []) if "doc_share" in t]
+                if _topics:
+                    st.markdown("#### 🛸 Topic Modeling — LDA (Latent Dirichlet Allocation)")
+                    _tpal = ["#818cf8", "#10b981", "#f59e0b", "#ec4899", "#06b6d4"]
+                    _tc = st.columns(len(_topics))
+                    for _i, (_tcc, _tp) in enumerate(zip(_tc, _topics)):
+                        _clr = _tpal[_i % len(_tpal)]
+                        with _tcc:
+                            _kws = _tp["keywords"][:6]
+                            st.markdown(f"""
+                            <div class="card" style="text-align:center">
+                                <div class="card-top-bar" style="background:{_clr}"></div>
+                                <b style="color:{_clr};font-family:'Outfit',sans-serif">📂 Topic {_tp['id']}</b><br>
+                                <span style="color:#94a3b8;font-size:0.75rem">{_tp['name']}</span><br>
+                                <span style="color:#64748b;font-size:0.78rem">{_tp['doc_share']}% of docs</span>
+                                <hr style="border-color:rgba(255,255,255,0.07);margin:8px 0">
+                                {''.join(f'<span class="badge b-other" style="margin:2px;font-size:0.7rem">{k}</span>' for k in _kws)}
+                            </div>""", unsafe_allow_html=True)
+
+                # Clustering
+                _cls = nlp_result.get("clusters", {})
+                if _cls and _cls.get("labels"):
+                    st.markdown("#### 🎯 K-Means Clustering (PCA 2D Projection)")
+                    _cpal = ["#818cf8", "#10b981", "#f59e0b", "#ec4899", "#06b6d4"]
+                    _labs = _cls["labels"]
+                    _tsmp = all_review_texts[:len(_labs)]
+                    _fcl  = go.Figure()
+                    for _ki in range(_cls["k"]):
+                        _kidx = [_ii for _ii, _ll in enumerate(_labs) if _ll == _ki]
+                        _kkws = ", ".join(_cls["keywords"].get(_ki, []))
+                        _fcl.add_trace(go.Scatter(
+                            x=[_cls["x"][_ii] for _ii in _kidx],
+                            y=[_cls["y"][_ii] for _ii in _kidx],
+                            mode="markers", name=f"Cluster {_ki+1}: {_kkws}",
+                            marker=dict(color=_cpal[_ki % len(_cpal)], size=8, opacity=0.75),
+                            text=[_tsmp[_ii][:60] if _ii < len(_tsmp) else "" for _ii in _kidx],
+                            hovertemplate="%{text}<extra>Cluster " + str(_ki+1) + "</extra>"
+                        ))
+                    st.plotly_chart(dark_chart(_fcl, "Review Clusters — Similar Reviews Grouped"), use_container_width=True)
+
+                # NER
+                _ner = nlp_result.get("ner", {})
+                _nc  = _ner.get("counts", {})
+                _nex = _ner.get("examples", {})
+                if _nc:
+                    st.markdown("#### 🔖 Named Entity Recognition (NER)")
+                    _cn, _cne = st.columns([1, 1])
+                    with _cn:
+                        _fn = go.Figure(go.Bar(
+                            x=list(_nc.values()),
+                            y=[_ner.get("labels", {}).get(k, k) for k in _nc.keys()],
+                            orientation="h", marker_color="#a78bfa"))
+                        _fn.update_layout(yaxis=dict(autorange="reversed"))
+                        st.plotly_chart(dark_chart(_fn, "Entity Type Distribution", height=280), use_container_width=True)
+                    with _cne:
+                        for _et, _exs in list(_nex.items())[:4]:
+                            _nice = _ner.get("labels", {}).get(_et, _et)
+                            _ehtml = " · ".join(f"`{e}`" for e in _exs[:4])
+                            st.markdown(f"**{_nice}**: {_ehtml}")
+
+                # Naive Bayes
+                _nb = nlp_result.get("nb", {})
+                if _nb and _nb.get("top_features"):
+                    st.markdown("#### 🧠 Naive Bayes — Discriminative Words per Sentiment Class")
+                    _nbcols = st.columns(len(_nb["top_features"]))
+                    _clsclr = {"positive": "#10b981", "negative": "#ef4444", "neutral": "#f59e0b"}
+                    for _nbc, (_cn2, _fts) in zip(_nbcols, _nb["top_features"].items()):
+                        _clr2 = _clsclr.get(_cn2, "#818cf8")
+                        _cnt  = _nb.get("label_dist", {}).get(_cn2, 0)
+                        with _nbc:
+                            st.markdown(f"""
+                            <div class="card">
+                                <div class="card-top-bar" style="background:{_clr2}"></div>
+                                <b style="color:{_clr2}">{_cn2.title()}</b>
+                                <span style="color:#64748b;font-size:0.75rem"> ({_cnt})</span><br><br>
+                                {''.join(f'<div style="color:#cbd5e1;font-size:0.82rem;padding:2px 0">• {f}</div>' for f in _fts[:8])}
+                            </div>""", unsafe_allow_html=True)
+
+                # Extractive Summary
+                _sum = nlp_result.get("summary", "")
+                if _sum:
+                    st.markdown("#### 📝 Extractive Summary (TF-IDF Sentence Scoring)")
+                    for _s in _sum.split(" … "):
+                        st.markdown(f"""
+                        <div class="card" style="border-left:3px solid #818cf8;padding-left:16px">
+                            <div class="card-top-bar"></div>
+                            <span style="color:#e2e8f0;font-size:0.92rem;line-height:1.7;font-style:italic">"{_s}"</span>
+                        </div>""", unsafe_allow_html=True)
+
+    with tab6:
         st.markdown('<div class="sec-lbl">📊 Combined Intelligence Dashboard</div>', unsafe_allow_html=True)
 
         # Combine all text sources
@@ -733,6 +1069,30 @@ if go_btn and product_query.strip():
         </div>""", unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
+        
+        # OpenRouter AI Recommendation
+        if product_query.strip():
+            with st.spinner("🤖 Generating Trinity AI Advice..."):
+                asp_str = ", ".join([f"{k}:{v['score']}" for k, v in combined.get("aspect_scores", {}).items()][:5])
+                ai_advice = get_ai_verdict(
+                    product_name=product_query,
+                    best_price=f"{best['price']:,}",
+                    ov_score=ov_score,
+                    yt_score=yt_score,
+                    reddit_sc=reddit_sc,
+                    aspect_scores=asp_str
+                )
+            
+            st.markdown(f"""
+            <div class="card" style="border-left: 4px solid #8b5cf6; padding-left: 1.5rem; background: rgba(139, 92, 246, 0.03);">
+                <div class="card-top-bar" style="background: #8b5cf6;"></div>
+                <h4 style="color: #c4b5fd; margin-top: 0;">✨ AI Purchase Recommendation</h4>
+                <div style="color: #e2e8f0; font-size: 0.95rem; line-height: 1.6; font-family: 'Inter', sans-serif;">
+                    {ai_advice}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
 
         # Combined sentiment donut
         col_donut2, col_scores = st.columns(2)

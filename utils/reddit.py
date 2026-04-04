@@ -1,56 +1,96 @@
 """
-Fetches Reddit opinions about a product using Reddit's public JSON search API.
-Falls back to mock data if the request fails.
+Real Reddit opinion fetcher.
+Fetches post titles + body text + top comments from the Reddit JSON API.
+No mock data fallback.
 """
-
 import requests
 import streamlit as st
 
 
-def _mock_reddit(query: str) -> list[dict]:
-    """Realistic mock Reddit opinions."""
-    posts = [
-        {"text": f"Just bought {query} and honestly it's pretty decent for the price. Build quality is solid."},
-        {"text": f"Anyone else had issues with {query}? Mine started heating up after 2 months of use."},
-        {"text": f"Compared {query} with alternatives - this one wins on display quality easily."},
-        {"text": f"Don't buy {query} from third-party sellers, got a fake one. Always buy from official store."},
-        {"text": f"{query} is overrated imo. You can get better value elsewhere."},
-        {"text": f"Battery on {query} is disappointing. Expected much better at this price point."},
-        {"text": f"Customer service for {query} was surprisingly helpful when I had an issue."},
-        {"text": f"Using {query} for 6 months now — zero complaints. Solid purchase."},
-    ]
-    return posts
+HEADERS = {
+    "User-Agent": "BuySmartAI/2.0 (research tool; not commercial)",
+    "Accept": "application/json",
+}
 
 
-@st.cache_data(show_spinner=False)
+def _fetch_comments(permalink: str) -> list[dict]:
+    """Fetch top comments from a Reddit post via its permalink."""
+    comments = []
+    try:
+        url = f"https://www.reddit.com{permalink}.json"
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if len(data) < 2:
+            return []
+        for child in data[1].get("data", {}).get("children", [])[:15]:
+            cd = child.get("data", {})
+            body = cd.get("body", "").strip()
+            if body and body not in ("[deleted]", "[removed]") and len(body) > 20:
+                comments.append({
+                    "text":      body[:400],
+                    "score":     cd.get("score", 0),
+                    "type":      "comment",
+                    "url":       "",
+                    "subreddit": cd.get("subreddit", ""),
+                    "author":    cd.get("author", ""),
+                })
+    except Exception:
+        pass
+    return comments
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_reddit_opinions(query: str) -> list[dict]:
     """
-    Fetch Reddit posts mentioning the product via Reddit's JSON search API.
-    Returns a list of dicts with a 'text' key.
+    Fetch Reddit posts + comments about the product.
+    Returns list of {"text", "score", "type", "url", "subreddit"}.
+    Raises requests.HTTPError on network failure.
     """
-    try:
-        url = "https://www.reddit.com/search.json"
-        params = {
-            "q": f"{query} review",
-            "sort": "relevance",
-            "limit": 15,
-            "type": "link"
-        }
-        headers = {"User-Agent": "BuySmartAI/1.0"}
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+    params = {
+        "q":     f"{query} review",
+        "sort":  "relevance",
+        "limit": 10,
+        "type":  "link",
+        "t":     "year",
+    }
+    resp = requests.get(
+        "https://www.reddit.com/search.json",
+        params=params,
+        headers=HEADERS,
+        timeout=12,
+    )
+    resp.raise_for_status()
 
-        results = []
-        for post in data.get("data", {}).get("children", []):
-            post_data = post.get("data", {})
-            text = post_data.get("title", "")
-            if post_data.get("selftext"):
-                text += " " + post_data.get("selftext", "")[:200]
-            if text.strip():
-                results.append({"text": text.strip()})
+    results = []
+    permalinks = []
 
-        return results[:10] if results else _mock_reddit(query)
-    except Exception as e:
-        print(f"Reddit fetch error: {e}")
-        return _mock_reddit(query)
+    for post in resp.json().get("data", {}).get("children", []):
+        pd = post.get("data", {})
+        title = pd.get("title", "").strip()
+        selftext = pd.get("selftext", "").strip()
+        text = title
+        if selftext and selftext not in ("[deleted]", "[removed]"):
+            text += " " + selftext[:300]
+
+        if text.strip():
+            results.append({
+                "text":      text.strip(),
+                "score":     pd.get("score", 0),
+                "type":      "post",
+                "url":       pd.get("url", ""),
+                "subreddit": pd.get("subreddit", ""),
+                "author":    pd.get("author", ""),
+            })
+        if pd.get("permalink"):
+            permalinks.append(pd["permalink"])
+
+    # Fetch comments from top 3 posts
+    for permalink in permalinks[:3]:
+        results.extend(_fetch_comments(permalink))
+
+    if not results:
+        raise ValueError(f"No Reddit discussions found for '{query}'.")
+
+    return results
